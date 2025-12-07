@@ -5,7 +5,6 @@ import os
 import uuid
 import re
 import time
-import psutil
 from datetime import datetime, timedelta
 
 # ================= CONFIG =================
@@ -248,4 +247,5 @@ def download_reels(message):
 # ================= RUN BOT =================
 
 bot.polling(non_stop=True)
+
 
