@@ -39,7 +39,7 @@ ADMIN_IDS = [ 1214273889]
 
 # Claude API keys — add as many as you have
 API_KEYS = [
-    "sk-abcdefabcdefabcdefabcdefabcdefabcdef12",
+    "sk-P14Owpz2g4YBHsj71XmOuIRkbVgZihExyLgO1hjCTeWDhVPv",
     "sk-1234567890abcdef1234567890abcdef12345678",
     "sk-P14Owpz2g4YBHsj71XmOuIRkbVgZihExyLgO1hjCTeWDhVPv",
 ]
