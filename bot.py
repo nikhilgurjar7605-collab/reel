@@ -44,6 +44,9 @@ API_KEYS = [
     "1ee99c4969aa4c7f94e0f2d60c9f83d7.GA2CV18F6Y4vvjkF",
     "sk-ureprPn36ELZ1O5rcWjfzftQ0CjecKgd3TBv9ufUJlNUR3Ly",
     "sk-P14Owpz2g4YBHsj71XmOuIRkbVgZihExyLgO1hjCTeWDhVPv",
+    "sk-abcdef1234567890abcdef1234567890abcdef12",
+    "sk-1234567890abcdef1234567890abcdef12345678",
+    "sk-abcdefabcdefabcdefabcdefabcdefabcdef12"
 ]
 
 # Default global message limit per user (admin can change with /setlimit)
