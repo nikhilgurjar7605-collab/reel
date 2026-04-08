@@ -1,13 +1,12 @@
 """
-Telegram Human-like Chatbot — Full Edition
+Telegram Human-like Chatbot — Advanced Edition
 Features:
-  ✅ Gender + Interest + Mood onboarding
-  ✅ Mood detection (start & mid-conversation)
-  ✅ Global message limit (admin set)
-  ✅ Multiple Claude API keys with cooldown rotation
-  ✅ Full conversation memory per user
-  ✅ Natural language media requests (photo/video)
-  ✅ Admin-mediated media delivery with 5-minute timeout
+  ✅ Gender selection on start (boy → girl bot, girl → boy bot)
+  ✅ Mood detection after gender — adapts tone to user's mood
+  ✅ Mood detected mid-conversation too — always stays in sync
+  ✅ Global message limit set by admin
+  ✅ Multiple Claude API keys with auto-rotation
+  ✅ Full conversation memory per user (persisted to disk)
 """
 
 import json
@@ -15,8 +14,7 @@ import time
 import logging
 import asyncio
 from pathlib import Path
-from typing import Optional, Dict
-from datetime import datetime
+from typing import Optional
 
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -34,19 +32,16 @@ from telegram.constants import ChatAction
 #  CONFIGURATION  — edit these
 # ════════════════════════════════════════════════
 
-TELEGRAM_BOT_TOKEN = "5504245119:AAFKEkExdeP5ojqobn_cx0vFP5LgmDHYSFA"   # from @BotFather
+TELEGRAM_BOT_TOKEN = "1ee99c4969aa4c7f94e0f2d60c9f83d7.GA2CV18F6Y4vvjkF"   # from @BotFather
 
 # Your Telegram user ID(s) who are admins (get yours from @userinfobot)
-ADMIN_IDS = [1214273889]
+ADMIN_IDS = [ 1214273889]
 
 # Claude API keys — add as many as you have
 API_KEYS = [
-    "1ee99c4969aa4c7f94e0f2d60c9f83d7.GA2CV18F6Y4vvjkF",
-    "sk-ureprPn36ELZ1O5rcWjfzftQ0CjecKgd3TBv9ufUJlNUR3Ly",
-    "sk-P14Owpz2g4YBHsj71XmOuIRkbVgZihExyLgO1hjCTeWDhVPv",
-    "sk-abcdef1234567890abcdef1234567890abcdef12",
+    "sk-abcdefabcdefabcdefabcdefabcdefabcdef12",
     "sk-1234567890abcdef1234567890abcdef12345678",
-    "sk-abcdefabcdefabcdefabcdefabcdefabcdef12"
+    "sk-P14Owpz2g4YBHsj71XmOuIRkbVgZihExyLgO1hjCTeWDhVPv",
 ]
 
 # Default global message limit per user (admin can change with /setlimit)
@@ -54,12 +49,6 @@ DEFAULT_MSG_LIMIT = 50   # 0 = unlimited
 
 # How many messages to keep in memory per user
 MAX_HISTORY = 30
-
-# Timeout for admin to send requested media (seconds)
-MEDIA_TIMEOUT_SECONDS = 300   # 5 minutes
-
-# Cooldown for rate-limited API keys (seconds)
-API_KEY_COOLDOWN = 60
 
 # Files for persistence
 HISTORY_FILE  = "conversation_history.json"
@@ -71,7 +60,6 @@ CONFIG_FILE   = "bot_config.json"
 # ════════════════════════════════════════════════
 
 STATE_GENDER   = "awaiting_gender"
-STATE_INTEREST = "awaiting_interest"
 STATE_MOOD     = "awaiting_mood"
 STATE_CHATTING = "chatting"
 
@@ -132,61 +120,38 @@ logger = logging.getLogger(__name__)
 
 
 # ════════════════════════════════════════════════
-#  IMPROVED API KEY MANAGER (with cooldown)
+#  API KEY MANAGER
 # ════════════════════════════════════════════════
 
 class APIKeyManager:
-    def __init__(self, keys: list, cooldown_seconds: int = API_KEY_COOLDOWN):
+    def __init__(self, keys: list):
         self.keys = [k for k in keys if k and not k.startswith("sk-ant-your")]
         self.current_index = 0
-        self.permanently_failed = set()      # keys that are dead (auth error)
-        self.temp_failed = {}                # key_index -> timestamp when it can be used again
-        self.cooldown = cooldown_seconds
+        self.failed = set()
         logger.info(f"Loaded {len(self.keys)} valid API key(s)")
-
-    def _is_available(self, idx: int) -> bool:
-        """Check if a key is not permanently failed and not in cooldown."""
-        if idx in self.permanently_failed:
-            return False
-        if idx in self.temp_failed:
-            if time.time() >= self.temp_failed[idx]:
-                # Cooldown expired, remove from temp_failed
-                del self.temp_failed[idx]
-                return True
-            return False
-        return True
 
     @property
     def current_key(self):
         if not self.keys:
             return None
-        # If current key is unavailable, rotate
-        if not self._is_available(self.current_index):
+        if self.current_index in self.failed:
             self._rotate()
-        if len(self.permanently_failed) >= len(self.keys):
+        if len(self.failed) >= len(self.keys):
             return None
         return self.keys[self.current_index]
 
     def _rotate(self):
-        """Rotate to the next available key."""
         for i in range(len(self.keys)):
             candidate = (self.current_index + 1 + i) % len(self.keys)
-            if self._is_available(candidate):
+            if candidate not in self.failed:
                 self.current_index = candidate
                 logger.info(f"Switched to API key #{candidate + 1}")
                 return
-        logger.error("No available API keys at the moment!")
+        logger.error("All API keys exhausted!")
 
-    def mark_permanent_failure(self, reason=""):
-        """Called for auth errors or unrecoverable failures."""
-        logger.warning(f"Key #{self.current_index + 1} permanently failed: {reason}")
-        self.permanently_failed.add(self.current_index)
-        self._rotate()
-
-    def mark_temporary_failure(self, reason=""):
-        """Called for rate limits or transient errors."""
-        logger.warning(f"Key #{self.current_index + 1} temporarily failed: {reason} – cooling down for {self.cooldown}s")
-        self.temp_failed[self.current_index] = time.time() + self.cooldown
+    def mark_failed(self, reason=""):
+        logger.warning(f"Key #{self.current_index + 1} failed: {reason}")
+        self.failed.add(self.current_index)
         self._rotate()
 
     def get_client(self):
@@ -194,8 +159,7 @@ class APIKeyManager:
         return anthropic.Anthropic(api_key=key) if key else None
 
     def available_count(self):
-        """Number of keys that are not permanently failed."""
-        return len(self.keys) - len(self.permanently_failed)
+        return len(self.keys) - len(self.failed)
 
 
 # ════════════════════════════════════════════════
@@ -274,15 +238,15 @@ if bot_config.get("msg_limit") is None:
 #  SYSTEM PROMPT BUILDER
 # ════════════════════════════════════════════════
 
-def build_system_prompt(interest, mood):
-    if interest == "female":
+def build_system_prompt(user_gender, mood):
+    if user_gender == "boy":
         persona_name = "Priya"
         style = (
             "You are a girl — warm, emotionally expressive, caring, and fun. "
             "You use cute expressions sometimes, genuinely listen to feelings, "
             "and have great intuition about people."
         )
-    else:  # male
+    else:
         persona_name = "Arjun"
         style = (
             "You are a guy — chill, confident, witty, and loyal. "
@@ -316,58 +280,41 @@ STRICT RULES:
 
 
 # ════════════════════════════════════════════════
-#  IMPROVED CLAUDE CALL (with automatic retry)
+#  CLAUDE API CALL
 # ════════════════════════════════════════════════
 
 def call_claude(system, messages):
-    """
-    Calls Claude with automatic key rotation.
-    If a key hits a rate limit, it goes into cooldown and we try another.
-    The same user message is retried until success or all keys are exhausted.
-    """
-    max_attempts = len(key_manager.keys) * 2  # try each key up to 2 times (with cooldown)
+    max_attempts = max(len(API_KEYS), 1)
     for attempt in range(max_attempts):
         client = key_manager.get_client()
         if not client:
-            break  # no usable keys
-
+            raise RuntimeError("All API keys exhausted.")
         try:
             response = client.messages.create(
-                model="claude-3-5-sonnet-20240620",
+                model="claude-opus-4-5",
                 max_tokens=512,
                 system=system,
                 messages=messages,
             )
             return response.content[0].text
 
-        except anthropic.RateLimitError as e:
-            key_manager.mark_temporary_failure(str(e))
-            time.sleep(2)
-            continue
-
         except anthropic.AuthenticationError as e:
-            key_manager.mark_permanent_failure(str(e))
-            continue
-
+            key_manager.mark_failed(f"Auth error: {e}")
+        except anthropic.RateLimitError as e:
+            key_manager.mark_failed(f"Rate limit: {e}")
         except anthropic.APIStatusError as e:
             if e.status_code in (401, 403):
-                key_manager.mark_permanent_failure(f"HTTP {e.status_code}")
-            elif e.status_code == 429:
-                key_manager.mark_temporary_failure("HTTP 429")
-                time.sleep(2)
+                key_manager.mark_failed(f"HTTP {e.status_code}")
             else:
-                logger.warning(f"API status error {e.status_code}: {e}")
-                key_manager.mark_temporary_failure(str(e))
+                logger.warning(f"API error: {e}")
                 time.sleep(1)
-            continue
-
+                if attempt >= 1:
+                    key_manager.mark_failed(f"Repeated error: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            key_manager.mark_temporary_failure(str(e))
-            time.sleep(1)
-            continue
+            logger.error(f"Unexpected: {e}")
+            raise
 
-    raise RuntimeError("All API keys are exhausted or rate-limited. Please try again later.")
+    raise RuntimeError("Failed after trying all API keys.")
 
 
 # ════════════════════════════════════════════════
@@ -376,10 +323,9 @@ def call_claude(system, messages):
 
 def get_user_data(user_id):
     return user_store.get(user_id, {
-        "state": STATE_GENDER,
-        "gender": None,
-        "interest": None,
-        "mood": "neutral",
+        "state":     STATE_GENDER,
+        "gender":    None,
+        "mood":      "neutral",
         "msg_count": 0,
     })
 
@@ -394,99 +340,98 @@ def is_admin(user_id):
 
 def gender_keyboard():
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("👦 Boy", callback_data="gender_boy"),
+        InlineKeyboardButton("👦 Boy",  callback_data="gender_boy"),
         InlineKeyboardButton("👧 Girl", callback_data="gender_girl"),
-    ]])
-
-def interest_keyboard():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("👩 Female", callback_data="interest_female"),
-        InlineKeyboardButton("👨 Male", callback_data="interest_male"),
     ]])
 
 def mood_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("😄 Happy", callback_data="mood_happy"),
-            InlineKeyboardButton("😢 Sad", callback_data="mood_sad"),
+            InlineKeyboardButton("😄 Happy",    callback_data="mood_happy"),
+            InlineKeyboardButton("😢 Sad",      callback_data="mood_sad"),
             InlineKeyboardButton("😰 Stressed", callback_data="mood_stressed"),
         ],
         [
-            InlineKeyboardButton("😐 Bored", callback_data="mood_bored"),
-            InlineKeyboardButton("😠 Angry", callback_data="mood_angry"),
+            InlineKeyboardButton("😐 Bored",    callback_data="mood_bored"),
+            InlineKeyboardButton("😠 Angry",    callback_data="mood_angry"),
             InlineKeyboardButton("🥰 Romantic", callback_data="mood_romantic"),
         ],
         [
-            InlineKeyboardButton("🤔 Curious", callback_data="mood_curious"),
-            InlineKeyboardButton("😶 Skip", callback_data="mood_neutral"),
+            InlineKeyboardButton("🤔 Curious",  callback_data="mood_curious"),
+            InlineKeyboardButton("😶 Skip",     callback_data="mood_neutral"),
         ],
     ])
 
 def detect_mood_from_text(text):
     text = text.lower()
     mood_keywords = {
-        "happy": ["happy", "great", "amazing", "awesome", "yay", "excited", "love", "fantastic"],
-        "sad": ["sad", "upset", "crying", "depressed", "unhappy", "heartbroken", "miserable"],
-        "stressed": ["stressed", "anxious", "worried", "overwhelmed", "nervous", "panic"],
-        "angry": ["angry", "mad", "furious", "annoyed", "irritated", "frustrated", "pissed"],
-        "bored": ["bored", "boring", "nothing to do", "dull", "meh"],
-        "romantic": ["love you", "miss you", "crush", "romantic", "flirt", "date"],
-        "curious": ["curious", "wonder", "how does", "why does", "what if", "explain"],
+        "happy":    ["happy", "great", "amazing", "awesome", "yay", "excited", "love", "fantastic", "wonderful", "overjoyed"],
+        "sad":      ["sad", "upset", "crying", "depressed", "unhappy", "heartbroken", "miserable", "lonely", "hopeless", "down"],
+        "stressed": ["stressed", "anxious", "worried", "overwhelmed", "nervous", "panic", "tense", "anxiety"],
+        "angry":    ["angry", "mad", "furious", "annoyed", "irritated", "frustrated", "pissed", "hate"],
+        "bored":    ["bored", "boring", "nothing to do", "dull", "meh"],
+        "romantic": ["love you", "miss you", "crush", "romantic", "flirt", "date", "feelings for"],
+        "curious":  ["curious", "wonder", "how does", "why does", "what if", "explain", "tell me about"],
     }
     for mood, keywords in mood_keywords.items():
         if any(kw in text for kw in keywords):
             return mood
     return None
 
-def is_media_request(text: str) -> tuple:
-    """
-    Returns (is_request, type) where type is 'photo' or 'video' or None.
-    """
-    t = text.lower()
-    photo_phrases = ["send me a photo", "send a photo", "send me photo", "send photo", "can you send a photo", "get me a photo", "share a photo"]
-    video_phrases = ["send me a video", "send a video", "send me video", "send video", "can you send a video", "get me a video", "share a video"]
-    if any(phrase in t for phrase in photo_phrases):
-        return (True, "photo")
-    if any(phrase in t for phrase in video_phrases):
-        return (True, "video")
-    return (False, None)
-
 
 # ════════════════════════════════════════════════
-#  MEDIA REQUEST TRACKING (in-memory with timeouts)
+#  TELEGRAM HANDLERS
 # ════════════════════════════════════════════════
 
-pending_media_requests: Dict[int, dict] = {}
-
-async def _media_timeout_callback(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Called after timeout if admin didn't send media."""
-    if user_id in pending_media_requests:
-        del pending_media_requests[user_id]
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="⚠️ error occurred, please try again sometime 😅\n\nLet's continue our chat!"
-            )
-        except Exception as e:
-            logger.warning(f"Could not send timeout message to {user_id}: {e}")
-
-def _schedule_media_timeout(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> asyncio.Task:
-    """Create a timeout task."""
-    async def timeout_wrapper():
-        await asyncio.sleep(MEDIA_TIMEOUT_SECONDS)
-        await _media_timeout_callback(user_id, context)
-    return asyncio.create_task(timeout_wrapper())
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    save_user_data(user.id, {
+        "state":     STATE_GENDER,
+        "gender":    None,
+        "mood":      "neutral",
+        "msg_count": 0,
+    })
+    conv_mgr.clear(user.id)
+    await update.message.reply_text(
+        f"Hey {user.first_name}! 👋\n\nQuick question — are you a boy or a girl? 😊",
+        reply_markup=gender_keyboard(),
+    )
 
 
-# ════════════════════════════════════════════════
-#  ADMIN COMMANDS
-# ════════════════════════════════════════════════
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_command(update, context)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ud   = get_user_data(user.id)
+    lim  = msg_limit()
+    used = ud.get("msg_count", 0)
+    remaining = "unlimited" if lim == 0 else str(max(0, lim - used))
+
+    gender = ud.get("gender")
+    if gender == "boy":
+        persona = "Priya (girl) 👧"
+    elif gender == "girl":
+        persona = "Arjun (boy) 👦"
+    else:
+        persona = "not set yet"
+
+    await update.message.reply_text(
+        f"📊 Your Status\n\n"
+        f"Chat persona : {persona}\n"
+        f"Your mood    : {ud.get('mood', 'neutral')}\n"
+        f"Messages used: {used}\n"
+        f"Remaining    : {remaining}\n"
+        f"API keys up  : {key_manager.available_count()}/{len(key_manager.keys)}"
+    )
+
 
 async def setlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin only: /setlimit <number>  (0 = unlimited)"""
     user = update.effective_user
     if not is_admin(user.id):
-        await update.message.reply_text("You do not have permission.")
+        await update.message.reply_text("You do not have permission to use this command.")
         return
     args = context.args
     if not args or not args[0].isdigit():
@@ -498,11 +443,12 @@ async def setlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Global message limit set to {label} messages per user.")
     logger.info(f"Admin {user.id} set msg_limit to {new_limit}")
 
+
 async def resetuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin only: /resetuser <user_id>"""
     user = update.effective_user
     if not is_admin(user.id):
-        await update.message.reply_text("You do not have permission.")
+        await update.message.reply_text("You do not have permission to use this command.")
         return
     args = context.args
     if not args or not args[0].isdigit():
@@ -514,123 +460,33 @@ async def resetuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_data(target_id, ud)
     await update.message.reply_text(f"Message count reset for user {target_id}.")
 
-async def sendmedia_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin only: /sendmedia <user_id> (attach photo or video)"""
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("You do not have permission.")
-        return
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /sendmedia <user_id>\nAttach a photo or video to the same message.")
-        return
-    target_id = int(args[0])
-
-    # Cancel any pending timeout for this user
-    if target_id in pending_media_requests:
-        req = pending_media_requests[target_id]
-        if "timeout_task" in req and not req["timeout_task"].done():
-            req["timeout_task"].cancel()
-        del pending_media_requests[target_id]
-
-    # Send the media
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        try:
-            await context.bot.send_photo(chat_id=target_id, photo=photo.file_id, caption="Here's your requested photo 📸")
-            await update.message.reply_text(f"✅ Photo sent to user {target_id}.")
-        except Exception as e:
-            await update.message.reply_text(f"Failed to send photo: {e}")
-    elif update.message.video:
-        video = update.message.video
-        try:
-            await context.bot.send_video(chat_id=target_id, video=video.file_id, caption="Here's your requested video 🎥")
-            await update.message.reply_text(f"✅ Video sent to user {target_id}.")
-        except Exception as e:
-            await update.message.reply_text(f"Failed to send video: {e}")
-    else:
-        await update.message.reply_text("You must attach a photo or video to this command.")
-
-
-# ════════════════════════════════════════════════
-#  USER COMMANDS
-# ════════════════════════════════════════════════
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    save_user_data(user.id, {
-        "state": STATE_GENDER,
-        "gender": None,
-        "interest": None,
-        "mood": "neutral",
-        "msg_count": 0,
-    })
-    conv_mgr.clear(user.id)
-    await update.message.reply_text(
-        f"Hey {user.first_name}! 👋\n\nQuick question — are you a boy or a girl? 😊",
-        reply_markup=gender_keyboard(),
-    )
-
-async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_command(update, context)
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    ud = get_user_data(user.id)
-    lim = msg_limit()
-    used = ud.get("msg_count", 0)
-    remaining = "unlimited" if lim == 0 else str(max(0, lim - used))
-    interest_display = "Female" if ud.get("interest") == "female" else "Male" if ud.get("interest") == "male" else "not set"
-    await update.message.reply_text(
-        f"📊 Your Status\n\n"
-        f"Your gender : {ud.get('gender', 'not set')}\n"
-        f"Talk to     : {interest_display}\n"
-        f"Your mood   : {ud.get('mood', 'neutral')}\n"
-        f"Msgs used   : {used}\n"
-        f"Remaining   : {remaining}\n"
-        f"API keys up : {key_manager.available_count()}/{len(key_manager.keys)}"
-    )
-
-
-# ════════════════════════════════════════════════
-#  CALLBACK HANDLER (gender, interest, mood)
-# ════════════════════════════════════════════════
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = update.effective_user
     data = query.data
-    ud = get_user_data(user.id)
+    ud   = get_user_data(user.id)
 
+    # Gender selection
     if data.startswith("gender_"):
         gender = data.split("_")[1]
         ud["gender"] = gender
-        ud["state"] = STATE_INTEREST
+        ud["state"]  = STATE_MOOD
+        persona_name = "Priya" if gender == "boy" else "Arjun"
         save_user_data(user.id, ud)
         await query.edit_message_text(
-            f"Got it! You are a {gender}.\n\nNow, who would you like to talk to? 😊",
-            reply_markup=interest_keyboard(),
-        )
-        return
-
-    if data.startswith("interest_"):
-        interest = data.split("_")[1]
-        ud["interest"] = interest
-        ud["state"] = STATE_MOOD
-        save_user_data(user.id, ud)
-        bot_persona = "a girl (Priya)" if interest == "female" else "a guy (Arjun)"
-        await query.edit_message_text(
-            f"Alright, you'll be talking to {bot_persona}!\n\n"
+            f"Nice! I am {persona_name} 😊\n\n"
             f"How are you feeling right now? Pick your vibe 👇\n"
             f"(tap Skip to just start chatting)",
             reply_markup=mood_keyboard(),
         )
         return
 
+    # Mood selection
     if data.startswith("mood_"):
         mood = data.split("_")[1]
-        ud["mood"] = mood
+        ud["mood"]  = mood
         ud["state"] = STATE_CHATTING
         save_user_data(user.id, ud)
 
@@ -644,18 +500,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "curious":  "oooh I love curious people! what are we exploring today? 🤔",
             "neutral":  "hey! so what is on your mind? 😊",
         }
+
         reply = mood_replies.get(mood, "hey! what is on your mind? 😊")
         await query.edit_message_text(f"Got it — {mood.capitalize()} mood! 🎯")
         await context.bot.send_message(chat_id=update.effective_chat.id, text=reply)
         return
 
 
-# ════════════════════════════════════════════════
-#  MAIN MESSAGE HANDLER (with media request interception)
-# ════════════════════════════════════════════════
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    user      = update.effective_user
     user_text = update.message.text
 
     if not user_text or not user_text.strip():
@@ -663,72 +516,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ud = get_user_data(user.id)
 
-    # Onboarding checks
+    # Still in onboarding?
     if ud["state"] == STATE_GENDER:
-        await update.message.reply_text("First tell me — are you a boy or a girl? 😊", reply_markup=gender_keyboard())
+        await update.message.reply_text(
+            "Hey! First tell me — are you a boy or a girl? 😊",
+            reply_markup=gender_keyboard(),
+        )
         return
-    if ud["state"] == STATE_INTEREST:
-        await update.message.reply_text("Who would you like to talk to? (Female or Male) 👇", reply_markup=interest_keyboard())
-        return
+
     if ud["state"] == STATE_MOOD:
-        await update.message.reply_text("Just pick your current mood 👇", reply_markup=mood_keyboard())
+        await update.message.reply_text(
+            "Almost there! Just pick your current mood 👇",
+            reply_markup=mood_keyboard(),
+        )
         return
 
     # Check message limit
     lim = msg_limit()
     if lim > 0 and ud.get("msg_count", 0) >= lim:
-        await update.message.reply_text("You have reached your message limit for now 😔\nContact the admin to keep chatting!")
+        await update.message.reply_text(
+            "you have reached your message limit for now 😔\n"
+            "contact the admin to keep chatting!"
+        )
         return
 
-    # ----- MEDIA REQUEST DETECTION -----
-    is_req, media_type = is_media_request(user_text)
-    if is_req and ud["state"] == STATE_CHATTING:
-        # User asked for a photo/video via natural language
-        wait_msg = "sending photo, please wait a moment..." if media_type == "photo" else "sending video, please wait a moment..."
-        await update.message.reply_text(wait_msg)
-
-        # Notify all admins
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    admin_id,
-                    f"📸 MEDIA REQUEST from user {user.id} (@{user.username or user.first_name})\n"
-                    f"Type: {media_type.upper()}\nMessage: {user_text[:200]}\n"
-                    f"Use /sendmedia {user.id} with the media attached."
-                )
-            except Exception as e:
-                logger.warning(f"Could not notify admin {admin_id}: {e}")
-
-        # Schedule timeout task
-        timeout_task = _schedule_media_timeout(user.id, context)
-
-        # Cancel any existing pending request for this user
-        if user.id in pending_media_requests:
-            old = pending_media_requests[user.id]
-            if "timeout_task" in old and not old["timeout_task"].done():
-                old["timeout_task"].cancel()
-        pending_media_requests[user.id] = {
-            "type": media_type,
-            "timeout_task": timeout_task,
-            "timestamp": datetime.now(),
-        }
-
-        # Do NOT pass this message to Claude. The bot has already replied.
-        # Also do not increment message count for this special request.
-        return
-
-    # ----- NORMAL CHAT (not a media request) -----
-    # Detect mood shift
+    # Detect mood shift from text
     detected = detect_mood_from_text(user_text)
     if detected and detected != ud.get("mood"):
         ud["mood"] = detected
-        save_user_data(user.id, ud)
         logger.info(f"Mood auto-updated for {user.id}: {detected}")
 
     # Typing indicator
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action=ChatAction.TYPING,
+    )
 
-    system = build_system_prompt(ud["interest"], ud["mood"])
+    system  = build_system_prompt(ud["gender"], ud["mood"])
     conv_mgr.add(user.id, "user", user_text)
     history = conv_mgr.get(user.id)
 
@@ -738,7 +562,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ud["msg_count"] = ud.get("msg_count", 0) + 1
         save_user_data(user.id, ud)
 
-        # Natural typing delay
         delay = min(2.5, max(0.4, len(reply) / 180))
         await asyncio.sleep(delay)
         await update.message.reply_text(reply)
@@ -769,18 +592,11 @@ def main():
     print(f"  Admins         : {ADMIN_IDS}")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # Admin commands
-    app.add_handler(CommandHandler("setlimit",  setlimit_command))
-    app.add_handler(CommandHandler("resetuser", resetuser_command))
-    app.add_handler(CommandHandler("sendmedia", sendmedia_command))
-
-    # User commands
     app.add_handler(CommandHandler("start",     start_command))
     app.add_handler(CommandHandler("reset",     reset_command))
     app.add_handler(CommandHandler("status",    status_command))
-
-    # Callbacks and messages
+    app.add_handler(CommandHandler("setlimit",  setlimit_command))
+    app.add_handler(CommandHandler("resetuser", resetuser_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
