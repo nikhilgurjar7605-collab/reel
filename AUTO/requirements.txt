@@ -1,5 +1,0 @@
-pyTelegramBotAPI
-yt-dlp
-psutil
-instaloader
-
